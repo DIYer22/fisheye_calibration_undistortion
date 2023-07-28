@@ -12,21 +12,21 @@ import json
 
 
 class FisheyeUndistortion:
-    def __init__(self, balance=0.5, CHECKERBOARD=(5, 7)):
+    def __init__(self, imgs=None, checkboard=(5, 7), size_mm=25, balance=0.5):
         self.balance = balance
-        self.CHECKERBOARD = CHECKERBOARD
-
-    def fit(self, imgs):
         self.checkboard_imgs = imgs
-        CHECKERBOARD = self.CHECKERBOARD
+        if imgs is None:
+            return
         subpix_criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.1)
         # calibration_flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC+cv2.fisheye.CALIB_CHECK_COND+cv2.fisheye.CALIB_FIX_SKEW
         calibration_flags = (
             cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC + cv2.fisheye.CALIB_FIX_SKEW
         )
-        objp = np.zeros((1, CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
-        objp[0, :, :2] = np.mgrid[0 : CHECKERBOARD[0], 0 : CHECKERBOARD[1]].T.reshape(
-            -1, 2
+        objp = np.zeros((1, checkboard[0] * checkboard[1], 3), np.float32)
+        objp[0, :, :2] = (
+            np.mgrid[0 : checkboard[0], 0 : checkboard[1]].T.reshape(-1, 2)
+            * size_mm
+            / 1000
         )
         objpoints = []  # 3d point in real world space
         imgpoints = []  # 2d points in image plane.
@@ -39,7 +39,7 @@ class FisheyeUndistortion:
             # Find the chess board corners
             ret, corners = cv2.findChessboardCorners(
                 gray,
-                CHECKERBOARD,
+                checkboard,
                 cv2.CALIB_CB_ADAPTIVE_THRESH
                 + cv2.CALIB_CB_FAST_CHECK
                 + cv2.CALIB_CB_NORMALIZE_IMAGE,
@@ -52,33 +52,33 @@ class FisheyeUndistortion:
         N_OK = len(objpoints)
         K = np.zeros((3, 3))
         D = np.zeros((4, 1))
-        rvecs = [np.zeros((1, 1, 3), dtype=np.float64) for i in range(N_OK)]
-        tvecs = [np.zeros((1, 1, 3), dtype=np.float64) for i in range(N_OK)]
-        rms, _, _, _, _ = cv2.fisheye.calibrate(
+        # rvecs = [np.zeros((1, 1, 3), dtype=np.float64) for i in range(N_OK)]
+        # tvecs = [np.zeros((1, 1, 3), dtype=np.float64) for i in range(N_OK)]
+        retval, K, D, rvecs, tvecs = cv2.fisheye.calibrate(
             objpoints,
             imgpoints,
             gray.shape[::-1],
             K,
             D,
-            rvecs,
-            tvecs,
-            calibration_flags,
-            (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6),
+            # rvecs,
+            # tvecs,
+            flags=calibration_flags,
+            criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6),
         )
         print("Found " + str(N_OK) + " valid images for calibration")
         print("K=np.array(" + str(K.tolist()) + ")")
         print("D=np.array(" + str(D.tolist()) + ")")
-        dim = gray.shape[::-1]
+        xy = gray.shape[::-1]
 
         balance = self.balance
-        scaled_K = K  # The values of K is to scale with image dimension.
+        scaled_K = K  # The values of K is to scale with image xyension.
         scaled_K[2][2] = 1.0  # Except that K[2][2] is always 1.0
-        # This is how scaled_K, dim2 and balance are used to determine the final K used to un-distort image. OpenCV document failed to make this clear!
+        # This is how scaled_K, xy2 and balance are used to determine the final K used to un-distort image. OpenCV document failed to make this clear!
         new_K = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
-            scaled_K, D, dim, np.eye(3), balance=balance
+            scaled_K, D, xy, np.eye(3), balance=balance
         )
         self.data = {
-            "dim": dim,
+            "xy": xy,
             "K": K,
             "D": D,
             "new_K": new_K,
@@ -86,6 +86,7 @@ class FisheyeUndistortion:
             "balance": balance,
         }
         self._set_map()
+        boxx.g()
 
     def _set_map(self):
         map1, map2 = cv2.fisheye.initUndistortRectifyMap(
@@ -93,7 +94,7 @@ class FisheyeUndistortion:
             self.data["D"],
             np.eye(3),
             self.data["new_K"],
-            tuple(self.data["dim"]),
+            tuple(self.data["xy"]),
             cv2.CV_16SC2,
         )
 
@@ -101,9 +102,9 @@ class FisheyeUndistortion:
         self.map2 = map2
 
     def undistort(self, img):
-        dim = img.shape[:2][::-1]  # dim is the dimension of input image to un-distort
+        xy = img.shape[:2][::-1]  # xy is the xyension of input image to un-distort
         assert (
-            dim[0] / dim[1] == self.data["dim"][0] / self.data["dim"][1]
+            xy[0] / xy[1] == self.data["xy"][0] / self.data["xy"][1]
         ), "Image to undistort needs to have same aspect ratio as the ones used in calibration"
 
         undistorted_img = cv2.remap(
@@ -126,7 +127,9 @@ class FisheyeUndistortion:
             json.dump(data, f)
         return jsp
 
-    def load(self, jsp="fisheye_calibration_data.json"):
+    @classmethod
+    def load(cls, jsp="fisheye_calibration_data.json"):
+        self = cls()
         data = boxx.loadjson(jsp)
         self.data = {
             k: np.array(data[k]) if k in self.TO_LIST_KEY else v
@@ -141,16 +144,17 @@ if __name__ == "__main__":
     checkboard_imgps = sorted(boxx.glob(f"{calibrate_dir}/*.jpg"))
     checkboard_imgs = [imread(imgp) for imgp in checkboard_imgps]
 
-    fisheye_undistortion = FisheyeUndistortion()
-
-    fisheye_undistortion.fit(checkboard_imgs)
+    fisheye_undistortion = FisheyeUndistortion(
+        checkboard_imgs,
+    )
 
     imgps = boxx.glob("distort/*.jpg")
+    # imgps = checkboard_imgps[:2]
     imgs = [imread(imgp) for imgp in imgps]
     for img in imgs:
         res = fisheye_undistortion.undistort(img)
         show - res
 
     fisheye_undistortion.save()
-    fisheye_undistortion2 = FisheyeUndistortion().load()
+    fisheye_undistortion2 = FisheyeUndistortion.load()
     show - fisheye_undistortion2.undistort(img)
